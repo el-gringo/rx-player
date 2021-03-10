@@ -17,6 +17,7 @@
 import config from "../../../config";
 import Manifest, {
   Adaptation,
+  ISegment,
   Period,
   Representation,
 } from "../../../manifest";
@@ -88,9 +89,10 @@ export default function getBufferStatus(
            getCurrentTime() : number; },
   fastSwitchThreshold : number | undefined,
   bufferGoal : number,
-  segmentBuffer : SegmentBuffer<unknown>
+  segmentBuffer : SegmentBuffer<unknown>,
+  segmentsBeingParsed : ISegment[]
 ) : IBufferStatus {
-  const { period, representation } = content;
+  const { period, adaptation, representation } = content;
   segmentBuffer.synchronizeInventory();
 
   const wantedStartPosition = tick.position + tick.wantedTimeOffset;
@@ -105,10 +107,20 @@ export default function getBufferStatus(
    * Every segment awaiting an "EndOfSegment" operation, which indicates that a
    * completely-loaded segment is still being pushed to the SegmentBuffer.
    */
-  const segmentsBeingPushed = segmentBuffer.getPendingOperations()
-    .filter((operation) : operation is IEndOfSegmentOperation =>
-      operation.type === SegmentBufferOperation.EndOfSegment
-    ).map(operation => operation.value);
+  const segmentsBeingPushed = segmentsBeingParsed
+    .map(segment => ({ adaptation, period, representation, segment }))
+    .concat(
+      segmentBuffer.getPendingOperations()
+        .filter((operation) : operation is IEndOfSegmentOperation =>
+          operation.type === SegmentBufferOperation.EndOfSegment
+        ).map(operation => operation.value)
+    );
+
+  console.error("HOPHOP",
+    representation.id,
+    JSON.stringify(segmentsBeingParsed.length),
+    JSON.stringify(segmentsBeingParsed.map(seg => seg.id)),
+    JSON.stringify(segmentsBeingPushed.map(seg => seg.segment.id)));
 
   /** Data on every segments buffered around `neededRange`. */
   const bufferedSegments =

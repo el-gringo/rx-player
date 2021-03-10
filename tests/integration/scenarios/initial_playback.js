@@ -213,7 +213,7 @@ describe("basic playback use cases: non-linear DASH SegmentTimeline", function (
     expect(player.getPlayerState()).to.equal("PAUSED");
   });
 
-  it("should download first segment when wanted buffer ahead is under first segment duration", async function () {
+  it.only("should download first segment when wanted buffer ahead is under first segment duration", async function () {
     xhrMock.lock();
     player.setWantedBufferAhead(2);
     player.loadVideo({
@@ -227,10 +227,16 @@ describe("basic playback use cases: non-linear DASH SegmentTimeline", function (
     await sleep(1);
 
     // init segments first media segments
+    const prevs = xhrMock.getLockedXHR().map(x => x.url);
     expect(xhrMock.getLockedXHR().length).to.equal(4);
     await xhrMock.flush();
     await sleep(100);
 
+    if (xhrMock.getLockedXHR().length > 0) {
+      console.error("!!! HERE",
+                    JSON.stringify(prevs),
+                    JSON.stringify(xhrMock.getLockedXHR().map(x => x.url)));
+    }
     expect(xhrMock.getLockedXHR().length).to.equal(0); // nada
     expect(player.getVideoLoadedTime()).to.be.above(4);
     expect(player.getVideoLoadedTime()).to.be.below(5);

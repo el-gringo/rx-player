@@ -16,6 +16,7 @@
 
 import {
   BehaviorSubject,
+  concat as observableConcat,
   defer as observableDefer,
   Observable,
   of as observableOf,
@@ -27,7 +28,9 @@ import {
 import {
   filter,
   finalize,
+  ignoreElements,
   map,
+  mapTo,
   mergeMap,
   share,
   switchMap,
@@ -84,12 +87,7 @@ export type IParsedInitSegmentEvent<T> = ISegmentParserInitSegment<T> &
 export type IParsedSegmentEvent<T> = ISegmentParserSegment<T> &
                                      { segment : ISegment };
 
-/** Notify that a media or initialization segment has been fully-loaded. */
-// TODO Shouldn't that event anounce when the segment has been fully loaded AND
-// parsed? There is technically a risk here if parsing takes too much
-// (asynchronous) time leading to that event being sent before a
-// `IParsedSegmentEvent` for that same segment.
-// In that case we could have all sorts of funny issues.
+/** Notify that a media or initialization segment has been fully-loaded and parsed. */
 export interface IEndOfSegmentEvent { type : "end-of-segment";
                                       value: { segment : ISegment }; }
 
@@ -167,6 +165,11 @@ export default class DownloadingQueue<T> {
    * `null` if no request is pending for it.
    */
   private _mediaSegmentRequest : ISegmentRequestObject<T>|null;
+  /**
+   * List of media segments that are currently either being loaded or parsed.
+   * Allows to avoid request and/or parsing multiple times the same segments.
+   */
+  private _pendingMediaSegments : ISegment[];
   /** Interface used to load segments. */
   private _segmentFetcher : IPrioritizedSegmentFetcher<T>;
 
@@ -190,6 +193,7 @@ export default class DownloadingQueue<T> {
     this._initSegmentRequest = null;
     this._mediaSegmentRequest = null;
     this._segmentFetcher = segmentFetcher;
+    this._pendingMediaSegments = [];
   }
 
   /**
@@ -232,20 +236,63 @@ export default class DownloadingQueue<T> {
           if (segmentQueue.length === 0) {
             return currentSegmentRequest !== null;
           } else if (currentSegmentRequest === null) {
-            return true;
+            const a = !segmentQueue.every(({ segment }) =>
+              this._pendingMediaSegments
+                .some(pendingSeg => pendingSeg.id === segment.id));
+            console.error("IS TRUE 1",
+              a,
+              segmentQueue.length,
+              this._content.representation.id,
+              null,
+              segmentQueue?.[0].segment.id,
+              JSON.stringify(this._pendingMediaSegments.map((x) => x.id)));
+            return a;
           }
-          if (currentSegmentRequest.segment.id !== segmentQueue[0].segment.id) {
-            return true;
+
+          let sqIdx = 0;
+          for (; sqIdx < segmentQueue.length; sqIdx++) {
+            const { segment, priority } = segmentQueue[sqIdx];
+            if (segment.id === currentSegmentRequest.segment.id) {
+              if (currentSegmentRequest.priority !== priority) {
+                this._segmentFetcher.updatePriority(currentSegmentRequest.request$,
+                                                    priority);
+              }
+              // The current request is still the most important, don't interrupt anything
+              console.error("IS false 1",
+                segmentQueue.length,
+                this._content.representation.id,
+                currentSegmentRequest.segment.id,
+                segmentQueue?.[0].segment.id,
+                JSON.stringify(this._pendingMediaSegments.map((x) => x.id)));
+              return false;
+            } else if (this._pendingMediaSegments.some((seg) => seg.id === segment.id)) {
+              // We don't know about that new important segment, interrupt the
+              // current requests and parsing operations
+              console.error("IS TRUE 2",
+                segmentQueue.length,
+                this._content.representation.id,
+                currentSegmentRequest.segment.id,
+                segmentQueue?.[0].segment.id,
+                JSON.stringify(this._pendingMediaSegments.map((x) => x.id)));
+              return true;
+            }
           }
-          if (currentSegmentRequest.priority !== segmentQueue[0].priority) {
-            this._segmentFetcher.updatePriority(currentSegmentRequest.request$,
-                                                segmentQueue[0].priority);
-          }
+
+          // All wanted segments are either pending a parse operation or being requested
+          console.error("IS false 2",
+            segmentQueue.length,
+            this._content.representation.id,
+            currentSegmentRequest.segment.id,
+            segmentQueue?.[0].segment.id,
+            JSON.stringify(this._pendingMediaSegments.map((x) => x.id)));
           return false;
         }),
         switchMap(({ segmentQueue }) =>
           segmentQueue.length > 0 ? this._requestMediaSegments(initSegmentTimescale$) :
-                                    EMPTY));
+                                    EMPTY),
+        finalize(() => {
+          this._pendingMediaSegments = [];
+        }));
 
       const initSegmentPush$ = this._downloadQueue$.pipe(
         filter((next) => {
@@ -268,7 +315,14 @@ export default class DownloadingQueue<T> {
         }));
 
       return observableMerge(initSegmentPush$, mediaQueue$);
-    }).pipe(share());
+    }).pipe(
+      share(),
+      finalize(() => {
+        // Once here we know we will never load any init segment again on that
+        // Observable.
+        // Complete this ReplaySubject to avoid leaking subscriptions to it.
+        initSegmentTimescale$.complete();
+      }));
 
     this._currentObs$ = obs;
 
@@ -296,8 +350,20 @@ export default class DownloadingQueue<T> {
       const request$ = this._segmentFetcher.createRequest(context, priority);
 
       this._mediaSegmentRequest = { segment, priority, request$ };
-      return request$
-        .pipe(mergeMap((evt) : Observable<IDownloadingQueueEvent<T>> => {
+
+      /**
+       * Lock implementation that allows to ensure that all chunks for a given
+       * segment are always parsed in order one after the other (and to ensure
+       * that the "end-of-segment" event is only sent once all chunks have been
+       * parsed).
+       * Wait initially for the initialization segment to be parsed.
+       * Emits the initialization segment's timescale when ready.
+       */
+      let chunkParsingLock$ = initSegmentTimescale$;
+      this._pendingMediaSegments.push(segment);
+
+      return request$.pipe(
+        mergeMap((evt) : Observable<IDownloadingQueueEvent<T>> => {
           switch (evt.type) {
             case "warning":
               return observableOf({ type: "retry" as const,
@@ -307,9 +373,11 @@ export default class DownloadingQueue<T> {
               return EMPTY;
 
             case "ended":
+              console.error("ENDED", this._content.representation.id, segment.id);
               this._mediaSegmentRequest = null;
               const lastQueue = this._downloadQueue$.getValue().segmentQueue;
               if (lastQueue.length === 0) {
+                console.error("IN LAST IN QUEUE");
                 return observableOf({ type : "end-of-queue",
                                       value : null });
               } else if (lastQueue[0].segment.id === segment.id) {
@@ -318,28 +386,50 @@ export default class DownloadingQueue<T> {
               return recursivelyRequestSegments(lastQueue[0]);
 
             case "chunk":
-            case "chunk-complete":
-              return initSegmentTimescale$.pipe(
+              return chunkParsingLock$.pipe(
                 take(1),
                 mergeMap((initTimescale) => {
-                  if (evt.type === "chunk-complete") {
-                    return observableOf({ type: "end-of-segment" as const,
-                                          value: { segment } });
-                  }
-                  return evt.parse(initTimescale).pipe(map(parserResponse => {
-                    return objectAssign({ segment }, parserResponse);
-                  }));
+                  chunkParsingLock$ = new ReplaySubject<number | undefined>(1);
+                  return observableConcat(
+                    evt.parse(initTimescale)
+                      .pipe(map((parserResponse) => objectAssign({ segment },
+                                                                 parserResponse))),
+
+                    // unlock lock for the next chunk after the emission
+                    observableDefer(() => { chunkParsingLock$.next(initTimescale); })
+                      .pipe(ignoreElements())
+                  );
+                }),
+                finalize(() => { chunkParsingLock$.complete(); }));
+
+            case "chunk-complete":
+              return chunkParsingLock$.pipe(
+                take(1),
+                mergeMap(() => {
+                  return observableOf({ type: "end-of-segment" as const,
+                                        value: { segment } });
                 }));
 
             default:
               assertUnreachable(evt);
+          }
+        }),
+        finalize(() => {
+          const indexInArr = this._pendingMediaSegments.indexOf(segment);
+          if (indexInArr < 0) {
+            log.error("Stream: didn't find segment currently parsed");
+          } else {
+            this._pendingMediaSegments.splice(indexInArr, 1);
           }
         }));
     };
 
     return observableDefer(() =>
       recursivelyRequestSegments(currentNeededSegment)
-    ).pipe(finalize(() => { this._mediaSegmentRequest = null; }));
+    ).pipe(finalize(() => {
+      console.error("IN FINALIZE", this._content.representation.id);
+      this._mediaSegmentRequest = null;
+    }));
   }
 
   /**
@@ -360,6 +450,15 @@ export default class DownloadingQueue<T> {
     const request$ = this._segmentFetcher.createRequest(context, priority);
 
     this._initSegmentRequest = { segment, priority, request$ };
+
+    /**
+     * Lock implementation that allows to ensure that all chunks are always parsed
+     * in order one after the other (and to ensure that the "end-of-segment" event
+     * is only sent once all chunks have been parsed).
+     */
+    let chunkParsingLock$ = new ReplaySubject<undefined>(1);
+    chunkParsingLock$.next(undefined);
+
     return request$
       .pipe(mergeMap((evt) : Observable<IDownloadingQueueEvent<T>> => {
         switch (evt.type) {
@@ -371,17 +470,26 @@ export default class DownloadingQueue<T> {
             return EMPTY;
 
           case "chunk":
-            return evt.parse(undefined).pipe(map(parserResponse => {
-              if (parserResponse.type === "parsed-init-segment") {
-                initSegmentTimescale$.next(parserResponse.value.initTimescale);
-              }
-              return objectAssign({ segment }, parserResponse);
-            }));
+            return chunkParsingLock$.pipe(
+              take(1),
+              mergeMap(() => {
+                chunkParsingLock$ = new ReplaySubject<undefined>(1);
+                return observableConcat(
+                  evt.parse(undefined).pipe(map(parserResponse => {
+                    if (parserResponse.type === "parsed-init-segment") {
+                      initSegmentTimescale$.next(parserResponse.value.initTimescale);
+                    }
+                    return objectAssign({ segment }, parserResponse);
+                  })),
+
+                  // unlock lock for the next chunk after the emission
+                  observableDefer(() => { chunkParsingLock$.next(undefined); })
+                    .pipe(ignoreElements()));
+              }));
 
           case "chunk-complete":
-            return observableOf({ type: "end-of-segment" as const,
-                                  value: { segment } });
-
+            return chunkParsingLock$.pipe(mapTo({ type: "end-of-segment" as const,
+                                                  value: { segment } }));
           case "ended":
             return EMPTY; // Do nothing, just here to check every case
           default:

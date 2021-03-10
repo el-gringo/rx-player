@@ -230,6 +230,8 @@ export default function RepresentationStream<T>({
   /** Will load every segments in `downloadQueue$` */
   const downloadingQueue = new DownloadingQueue(content, downloadQueue$, segmentFetcher);
 
+  const segmentParsingWaitingQueue : ISegment[] = [];
+
   /** Observable loading and pushing segments scheduled through `downloadQueue$`. */
   const queue$ = downloadingQueue.start()
     .pipe(mergeMap(onQueueEvent));
@@ -254,7 +256,8 @@ export default function RepresentationStream<T>({
                                      tick,
                                      fastSwitchThreshold,
                                      bufferGoal,
-                                     segmentBuffer);
+                                     segmentBuffer,
+                                     segmentParsingWaitingQueue);
       const { neededSegments } = status;
       let neededInitSegment : IQueuedSegment | null = null;
 
@@ -292,6 +295,10 @@ export default function RepresentationStream<T>({
           log.debug("Stream: Urgent switch, terminate now.", bufferType);
           downloadQueue$.next({ initSegment: null, segmentQueue: [] });
           downloadQueue$.complete();
+
+          // Stop awaiting initialization segment data, to avoid possibly leaking
+          // subscriptions to this ReplaySubject.
+          initSegmentState.segmentData$.complete();
           return observableOf(EVENTS.streamTerminating());
         } else {
           const nextQueue = currentSegmentRequest === null ||
@@ -307,6 +314,13 @@ export default function RepresentationStream<T>({
           if (nextQueue.length === 0 && nextInit === null) {
             log.debug("Stream: No request left, terminate", bufferType);
             downloadQueue$.complete();
+
+            // Stop awaiting initialization segment data, to avoid possibly leaking
+            // subscriptions to this ReplaySubject.
+            // Note that this might lead to an unnecessary waste of loaded segments
+            // if the init segment was already loaded and currently being parsed.
+            // However this is a small sacrifice to pay.
+            initSegmentState.segmentData$.complete();
             return observableOf(EVENTS.streamTerminating());
           }
         }
@@ -376,15 +390,25 @@ export default function RepresentationStream<T>({
         return observableMerge(protectedEvents$, pushEvent$);
 
       case "parsed-segment":
+        console.error("PUSHING PARSED", representation.id, evt.segment.id);
+        segmentParsingWaitingQueue.push(evt.segment);
         return initSegmentState.segmentData$.pipe(
           take(1),
-          mergeMap((initSegmentData) =>
-            pushMediaSegment({ clock$,
-                               content,
-                               initSegmentData,
-                               parsedSegment: evt.value,
-                               segment: evt.segment,
-                               segmentBuffer })));
+          mergeMap((initSegmentData) => {
+            const indexInWaitingQueue = segmentParsingWaitingQueue.indexOf(evt.segment);
+            if (indexInWaitingQueue < 0) {
+              log.error("Stream: didn't find segment currently parsed");
+            } else {
+              segmentParsingWaitingQueue.splice(indexInWaitingQueue);
+              console.error("SPLICED", representation.id, evt.segment.id);
+            }
+            return pushMediaSegment({ clock$,
+                                      content,
+                                      initSegmentData,
+                                      parsedSegment: evt.value,
+                                      segment: evt.segment,
+                                      segmentBuffer });
+          }));
 
       case "end-of-segment": {
         const { segment } = evt.value;
