@@ -48,8 +48,8 @@ import {
   ISegmentLoaderArguments,
   ISegmentLoaderEvent,
   ISegmentParserArguments,
-  ISegmentParserInitSegment,
-  ISegmentParserSegment,
+  ISegmentParserParsedInitSegment,
+  ISegmentParserParsedSegment,
   ITextTrackSegmentData,
   ITransportOptions,
   ITransportPipelines,
@@ -179,24 +179,24 @@ export default function(options : ITransportOptions) : ITransportPipelines {
       response,
       initTimescale,
     } : ISegmentParserArguments< ArrayBuffer | Uint8Array | null >
-    ) : ISegmentParserInitSegment<ArrayBuffer | Uint8Array | null>  |
-        ISegmentParserSegment<ArrayBuffer | Uint8Array | null>
+    ) : ISegmentParserParsedInitSegment<ArrayBuffer | Uint8Array | null>  |
+        ISegmentParserParsedSegment<ArrayBuffer | Uint8Array | null>
     {
       const { segment, adaptation, manifest } = content;
       const { data, isChunked } = response;
       if (data === null) {
         if (segment.isInit) {
-          return { type: "parsed-init-segment",
-                   value: { initializationData: null,
-                            protectionDataUpdate: false,
-                            initTimescale: undefined } };
+          return { segmentType: "init",
+                   initializationData: null,
+                   protectionDataUpdate: false,
+                   initTimescale: undefined };
         }
-        return { type: "parsed-segment",
-                 value: { chunkData: null,
-                          chunkInfos: null,
-                          chunkOffset: 0,
-                          protectionDataUpdate: false,
-                          appendWindow: [undefined, undefined] } };
+        return { segmentType: "media",
+                 chunkData: null,
+                 chunkInfos: null,
+                 chunkOffset: 0,
+                 protectionDataUpdate: false,
+                 appendWindow: [undefined, undefined] };
       }
 
       const responseBuffer = data instanceof Uint8Array ? data :
@@ -204,12 +204,12 @@ export default function(options : ITransportOptions) : ITransportPipelines {
 
       if (segment.isInit) {
         const timescale = segment.privateInfos?.smoothInitSegment?.timescale;
-        return { type: "parsed-init-segment",
-                 value: { initializationData: data,
-                          // smooth init segments are crafted by hand.
-                          // Their timescale is the one from the manifest.
-                          initTimescale: timescale,
-                          protectionDataUpdate: false } };
+        return { segmentType: "init",
+                 initializationData: data,
+                 // smooth init segments are crafted by hand.
+                 // Their timescale is the one from the manifest.
+                 initTimescale: timescale,
+                 protectionDataUpdate: false };
       }
 
       const timingInfos = initTimescale !== undefined ?
@@ -230,12 +230,12 @@ export default function(options : ITransportOptions) : ITransportPipelines {
       if (nextSegments.length > 0) {
         addNextSegments(adaptation, nextSegments, segment);
       }
-      return { type: "parsed-segment",
-               value: { chunkData,
-                        chunkInfos,
-                        chunkOffset: 0,
-                        protectionDataUpdate: false,
-                        appendWindow: [undefined, undefined] } };
+      return { segmentType: "media",
+               chunkData,
+               chunkInfos,
+               chunkOffset: 0,
+               protectionDataUpdate: false,
+               appendWindow: [undefined, undefined] };
     },
   };
 
@@ -271,8 +271,8 @@ export default function(options : ITransportOptions) : ITransportPipelines {
       response,
       initTimescale,
     } : ISegmentParserArguments<string|ArrayBuffer|Uint8Array|null>
-    ) : ISegmentParserInitSegment<null>  |
-        ISegmentParserSegment<ITextTrackSegmentData>
+    ) : ISegmentParserParsedInitSegment<null>  |
+        ISegmentParserParsedSegment<ITextTrackSegmentData>
     {
       const { manifest, adaptation, representation, segment } = content;
       const { language } = adaptation;
@@ -280,18 +280,18 @@ export default function(options : ITransportOptions) : ITransportPipelines {
       const { mimeType = "", codec = "" } = representation;
       const { data, isChunked } = response;
       if (segment.isInit) { // text init segment has no use in HSS
-        return { type: "parsed-init-segment",
-                 value: { initializationData: null,
-                          protectionDataUpdate: false,
-                          initTimescale: undefined } };
+        return { segmentType: "init",
+                 initializationData: null,
+                 protectionDataUpdate: false,
+                 initTimescale: undefined };
       }
       if (data === null) {
-        return { type: "parsed-segment",
-                 value: { chunkData: null,
-                          chunkInfos: null,
-                          chunkOffset: 0,
-                          protectionDataUpdate: false,
-                          appendWindow: [undefined, undefined] } };
+        return { segmentType: "media",
+                 chunkData: null,
+                 chunkInfos: null,
+                 chunkOffset: 0,
+                 protectionDataUpdate: false,
+                 appendWindow: [undefined, undefined] };
       }
 
       let nextSegments;
@@ -394,16 +394,16 @@ export default function(options : ITransportOptions) : ITransportPipelines {
       }
 
       const chunkOffset = segmentStart ?? 0;
-      return { type: "parsed-segment",
-               value: { chunkData: { type: _sdType,
-                                     data: _sdData,
-                                     start: segmentStart,
-                                     end: segmentEnd,
-                                     language },
-                        chunkInfos,
-                        chunkOffset,
-                        protectionDataUpdate: false,
-                        appendWindow: [undefined, undefined] } };
+      return { segmentType: "media",
+               chunkData: { type: _sdType,
+                            data: _sdData,
+                            start: segmentStart,
+                            end: segmentEnd,
+                            language },
+               chunkInfos,
+               chunkOffset,
+               protectionDataUpdate: false,
+               appendWindow: [undefined, undefined] };
     },
   };
 
@@ -425,16 +425,16 @@ export default function(options : ITransportOptions) : ITransportPipelines {
 
     parser(
       { response, content } : ISegmentParserArguments<Uint8Array|ArrayBuffer|null>
-    ) : ISegmentParserInitSegment<null> |
-        ISegmentParserSegment<IImageTrackSegmentData>
+    ) : ISegmentParserParsedInitSegment<null> |
+        ISegmentParserParsedSegment<IImageTrackSegmentData>
     {
       const { data, isChunked } = response;
 
       if (content.segment.isInit) { // image init segment has no use
-        return { type: "parsed-init-segment",
-                 value: { initializationData: null,
-                          protectionDataUpdate: false,
-                          initTimescale: undefined } };
+        return { segmentType: "init",
+                 initializationData: null,
+                 protectionDataUpdate: false,
+                 initTimescale: undefined };
       }
 
       if (isChunked) {
@@ -443,27 +443,27 @@ export default function(options : ITransportOptions) : ITransportPipelines {
 
       // TODO image Parsing should be more on the buffer side, no?
       if (data === null || features.imageParser === null) {
-        return { type: "parsed-segment",
-                 value: { chunkData: null,
-                          chunkInfos: null,
-                          chunkOffset: 0,
-                          protectionDataUpdate: false,
-                          appendWindow: [undefined, undefined] } };
+        return { segmentType: "media",
+                 chunkData: null,
+                 chunkInfos: null,
+                 chunkOffset: 0,
+                 protectionDataUpdate: false,
+                 appendWindow: [undefined, undefined] };
       }
 
       const bifObject = features.imageParser(new Uint8Array(data));
       const thumbsData = bifObject.thumbs;
-      return { type: "parsed-segment",
-               value: { chunkData: { data: thumbsData,
-                                     start: 0,
-                                     end: Number.MAX_VALUE,
-                                     timescale: 1,
-                                     type: "bif" },
-                        chunkInfos: { time: 0,
-                                      duration: Number.MAX_VALUE },
-                        chunkOffset: 0,
-                        protectionDataUpdate: false,
-                        appendWindow: [undefined, undefined] } };
+      return { segmentType: "media",
+               chunkData: { data: thumbsData,
+                            start: 0,
+                            end: Number.MAX_VALUE,
+                            timescale: 1,
+                            type: "bif" },
+               chunkInfos: { time: 0,
+                             duration: Number.MAX_VALUE },
+               chunkOffset: 0,
+               protectionDataUpdate: false,
+               appendWindow: [undefined, undefined] } ;
     },
   };
 
