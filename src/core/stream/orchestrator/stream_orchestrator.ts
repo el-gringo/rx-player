@@ -111,7 +111,7 @@ export default function StreamOrchestrator(
   clock$ : Observable<IStreamOrchestratorClockTick>,
   abrManager : ABRManager,
   segmentBuffersStore : SegmentBuffersStore,
-  segmentFetcherCreator : SegmentFetcherCreator<any>,
+  segmentFetcherCreator : SegmentFetcherCreator,
   options: IStreamOrchestratorOptions
 ) : Observable<IStreamOrchestratorEvent> {
   const { manifest, initialPeriod } = content;
