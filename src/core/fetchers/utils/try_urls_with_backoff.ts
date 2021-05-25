@@ -139,7 +139,10 @@ function getRequestErrorType(error : unknown) : REQUEST_ERROR_TYPES {
  */
 export function tryURLsWithBackoff<T>(
   urls : Array<string|null>,
-  performRequest : (url : string | null) => Promise<T>,
+  performRequest : (
+    url : string | null,
+    cancellationSignal : CancellationSignal
+  ) => Promise<T>,
   options : IBackoffSettings,
   cancellationSignal : CancellationSignal
 ) : Promise<T> {
@@ -180,7 +183,7 @@ export function tryURLsWithBackoff<T>(
     index : number
   ) : Promise<T> {
     try {
-      const res = await performRequest(url);
+      const res = await performRequest(url, cancellationSignal);
       return res;
     } catch (error : unknown) {
       if (TaskCanceller.isCancellationError(error)) {

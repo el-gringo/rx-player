@@ -36,7 +36,9 @@ import arrayIncludes from "../../../utils/array_includes";
 import idGenerator from "../../../utils/id_generator";
 import InitializationSegmentCache from "../../../utils/initialization_segment_cache";
 import objectAssign from "../../../utils/object_assign";
-import TaskCanceller from "../../../utils/task_canceller";
+import TaskCanceller, {
+  CancellationSignal,
+} from "../../../utils/task_canceller";
 import {
   IABRMetricsEvent,
   IABRRequestBeginEvent,
@@ -212,11 +214,15 @@ export default function createSegmentFetcher<
 
       /**
        * Call a segment loader for the given URL with the right arguments.
-       * @param {string|null}
-       * @returns {Observable}
+       * @param {string|null} url
+       * @param {Object} cancellationSignal
+       * @returns {Promise}
        */
-      function callLoaderWithUrl(url : string | null) {
-        return loadSegment(url, content, canceller.signal, loaderCallbacks);
+      function callLoaderWithUrl(
+        url : string | null,
+        cancellationSignal: CancellationSignal
+      ) {
+        return loadSegment(url, content, cancellationSignal, loaderCallbacks);
       }
 
       /**
