@@ -20,7 +20,6 @@ import {
   scan,
   withLatestFrom,
 } from "rxjs/operators";
-import { isPlaybackStuck } from "../../compat";
 import isSeekingApproximate from "../../compat/is_seeking_approximate";
 import config from "../../config";
 import { MediaError } from "../../errors";
@@ -106,7 +105,7 @@ interface IDiscontinuityStoredInfo {
 
 /**
  * Monitor situations where playback is stalled and try to get out of those.
- * Emit "stalled" then "unstalled" respectably when an unavoidable stall is
+ * Emit "stalled" then "unstalled" respectively when an unavoidable stall is
  * encountered and exited.
  * @param {Observable} clock$ - Observable emitting the current playback
  * conditions.
@@ -167,8 +166,23 @@ export default function StallAvoider(
   return clock$.pipe(
     withLatestFrom(discontinuitiesStore$),
     map(([tick, discontinuitiesStore]) => {
-      const { buffered, currentRange, position, event, stalled } = tick;
-      if (stalled === null) {
+      const { buffered,
+              position,
+              rebuffering,
+              /* freezing */ } = tick;
+
+      // if (freezing !== null) {
+      //   console.warn("???????", freezing);
+      //   // // XXX TODO handle
+      //   // const now = performance.now();
+      //   // if (now - freezing.timestamp > 1) {
+      //   //   setCurrentTime(now + 0.001);
+      //   // }
+      //   return { type: "stalled" as const,
+      //            value: "freezing" as const };
+      // }
+
+      if (rebuffering === null) {
         return { type: "unstalled" as const,
                  value: null };
       }
@@ -185,7 +199,7 @@ export default function StallAvoider(
             now - ignoredStallTimeStamp < FORCE_DISCONTINUITY_SEEK_DELAY)
         {
           return { type: "stalled" as const,
-                   value: stalled };
+                   value: rebuffering.reason };
         }
         lastSeekingPosition = null;
       }
@@ -193,7 +207,7 @@ export default function StallAvoider(
       ignoredStallTimeStamp = null;
 
       /** Position at which data is awaited. */
-      const { position: stalledPosition } = stalled;
+      const { position: stalledPosition } = rebuffering;
 
       if (stalledPosition !== null) {
         const skippableDiscontinuity = findSeekableDiscontinuity(discontinuitiesStore,
@@ -212,19 +226,6 @@ export default function StallAvoider(
                                                              realSeekTime));
           }
         }
-      }
-
-      // Is it a browser bug? -> force seek at the same current time
-      if (isPlaybackStuck(position,
-                          currentRange,
-                          event,
-                          stalled !== null)
-      ) {
-        log.warn("Init: After freeze seek", position, currentRange);
-        setCurrentTime(position);
-        return EVENTS.warning(generateDiscontinuityError(position,
-                                                         position));
-
       }
 
       const freezePosition = stalledPosition ?? position;
@@ -266,7 +267,7 @@ export default function StallAvoider(
       }
 
       return { type: "stalled" as const,
-               value: stalled };
+               value: rebuffering.reason };
     }));
 }
 

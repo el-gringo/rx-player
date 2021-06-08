@@ -31,6 +31,7 @@ import {
   map,
   mergeMap,
   mergeMapTo,
+  switchMap,
   share,
   take,
 } from "rxjs/operators";
@@ -38,18 +39,20 @@ import {
   clearElementSrc,
   setElementSrc$,
 } from "../../compat";
-import { MediaError } from "../../errors";
 import log from "../../log";
 import deferSubscriptions from "../../utils/defer_subscriptions";
+import filterMap from "../../utils/filter_map";
 import { IKeySystemOption } from "../eme";
 import createEMEManager from "./create_eme_manager";
 import EVENTS from "./events_generators";
 import { IInitialTimeOptions } from "./get_initial_time";
-import seekAndLoadOnMediaEvents from "./initial_seek_and_play";
+import initialSeekAndPlay from "./initial_seek_and_play";
+import isContentLoaded from "./is_content_loaded";
 import throwOnMediaError from "./throw_on_media_error";
 import {
   IDirectfileEvent,
   IInitClockTick,
+  ILoadedEvent,
 } from "./types";
 import updatePlaybackRate from "./update_playback_rate";
 
@@ -137,12 +140,12 @@ export default function initializeDirectfileContent({
   const initialTime = () => getDirectFileInitialTime(mediaElement, startAt);
   log.debug("Init: Initial time calculated:", initialTime);
 
-  const { seek$, load$ } = seekAndLoadOnMediaEvents({ clock$,
-                                                      mediaElement,
-                                                      startTime: initialTime,
-                                                      mustAutoPlay: autoPlay,
-                                                      setCurrentTime,
-                                                      isDirectfile: true });
+  const { seek$, play$ } = initialSeekAndPlay({ clock$,
+                                                mediaElement,
+                                                startTime: initialTime,
+                                                mustAutoPlay: autoPlay,
+                                                setCurrentTime,
+                                                isDirectfile: true });
 
   // Create EME Manager, an observable which will manage every EME-related
   // issue.
@@ -165,11 +168,17 @@ export default function initializeDirectfileContent({
   // Create Stalling Manager, an observable which will try to get out of
   // various infinite stalling issues
   const stalled$ = clock$.pipe(
-    map(tick => tick.stalled === null ? EVENTS.unstalled() :
-                                        EVENTS.stalled(tick.stalled)));
+    map(tick => tick.rebuffering !== null ? EVENTS.stalled(tick.rebuffering.reason) :
+                // XXX TODO
+                // tick.freezing === null ?    EVENTS.stalled("freezing") :
+                                            EVENTS.unstalled()));
 
-  // Manage "loaded" event and warn if autoplay is blocked on the current browser
-  const loadedEvent$ = emeManager$.pipe(
+  /**
+   * Emit a "loaded" events once the initial play has been performed and the
+   * media can begin playback.
+   * Also emits warning events if issues arise when doing so.
+   */
+  const loadingEvts$ = emeManager$.pipe(
     filter(function isEMEReady(evt) {
       if (evt.type === "created-media-keys") {
         evt.value.attachMediaKeys$.next();
@@ -178,25 +187,22 @@ export default function initializeDirectfileContent({
       return evt.type === "eme-disabled" || evt.type === "attached-media-keys";
     }),
     take(1),
-    mergeMapTo(load$),
-    mergeMap((evt) => {
-      if (evt === "autoplay-blocked") {
-        const error = new MediaError("MEDIA_ERR_BLOCKED_AUTOPLAY",
-                                     "Cannot trigger auto-play automatically: " +
-                                     "your browser does not allow it.");
-        return observableOf(EVENTS.warning(error), EVENTS.loaded(null));
-      } else if (evt === "not-loaded-metadata") {
-        const error = new MediaError("MEDIA_ERR_NOT_LOADED_METADATA",
-                                     "Cannot load automatically: your browser " +
-                                     "falsely announced having loaded the content.");
-        return observableOf(EVENTS.warning(error));
+    mergeMapTo(play$),
+    switchMap((evt) => {
+      if (evt.type === "warning") {
+        return observableOf(evt);
       }
-      return observableOf(EVENTS.loaded(null));
+      return clock$.pipe(
+        filterMap<IInitClockTick, ILoadedEvent, null>((tick) => {
+          return isContentLoaded(tick, true) ? EVENTS.loaded(null) :
+                                               null;
+        }, null),
+        take(1));
     }));
 
   const initialSeek$ = seek$.pipe(ignoreElements());
 
-  return observableMerge(loadedEvent$,
+  return observableMerge(loadingEvts$,
                          initialSeek$,
                          emeManager$,
                          mediaError$,
